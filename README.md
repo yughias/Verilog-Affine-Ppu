@@ -4,6 +4,13 @@ A small PPU (picture processing unit, the chip that draws the screen in old cons
 
 I made it to replicate for fun a GBA like ppu (so with affine BG rendering and multiple background layers).
 
+| | |
+|---|---|
+| ![Mode 7 road with a sky and a kart](images/mode7.png) | ![Rotated background behind a colonnade](images/rotozoom.png) |
+| Mode 7: the background matrix changes on every line | Rotation and zoom, with sprites passing behind the foreground |
+| ![Three views on the same screen](images/split_screen.png) | ![Screen full of sprites](images/sprite_storm.png) |
+| Three views on one screen, each with its own matrix | 181 sprites, rewriting the 32 OAM entries during the frame |
+
 ## About the use of AI
 
 The Verilog is the point of this project: the PPU in `verilog/` was made for study.
@@ -55,4 +62,12 @@ Every program ends up in its own folder:
 ./obj_editor/Vppu my_level.ppus   # draw your own scene
 ```
 
-The full list of keys is in the comment at the top of each `.cpp` file (`simple` prints it in the terminal). If a build fails after moving files around, `make clean` usually fixes it.
+The inspector shows what each layer is doing, the registers of every line and the OAM:
+
+![Inspector of the tech demo](images/inspector.png)
+
+The editor, with a small sample scene:
+
+![Scenario editor](images/editor.png)
+
+The full list of keys is in the comment at the top of each `.cpp` file (`simple` prints it in the terminal).
