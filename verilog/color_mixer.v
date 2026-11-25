@@ -12,7 +12,11 @@ module color_mixer #(
 
     output reg [2:0] r,
     output reg [2:0] g,
-    output reg [1:0] b
+    output reg [1:0] b,
+
+    input wire we,
+    input wire [13:0] vram_addr,
+    input wire [7:0] vram_din
 );
     localparam COL_RAM_ADDR_SPACE = ATTR_BITS + COL_BITS;
 
@@ -20,13 +24,18 @@ module color_mixer #(
     wire [7:0] bg_rgb332;
     wire [7:0] sprite_rgb332;
 
+    wire bg_we = we && (vram_addr[13:12] == 2'b00);
+    wire fg_we = we && (vram_addr[13:12] == 2'b01);
+    wire sprite_we = we && (vram_addr[13:12] == 2'b10);
+
     ram #(
         .ADDR_WIDTH(COL_RAM_ADDR_SPACE)
     ) fg_col_ram (
         .clk  (clk),
-        .we   (1'b0),
-        .addr (fg_idx),
-        .din  (0),
+        .we   (fg_we),
+        .addr_w (vram_addr[7:0]),
+        .addr_r (fg_idx),
+        .din  (vram_din),
         .dout (fg_rgb332)
     );
 
@@ -34,9 +43,10 @@ module color_mixer #(
         .ADDR_WIDTH(COL_RAM_ADDR_SPACE)
     ) bg_col_ram (
         .clk  (clk),
-        .we   (1'b0),
-        .addr (bg_idx),
-        .din  (0),
+        .we   (bg_we),
+        .addr_w (vram_addr[7:0]),
+        .addr_r (bg_idx),
+        .din  (vram_din),
         .dout (bg_rgb332)
     );
 
@@ -44,9 +54,10 @@ module color_mixer #(
         .ADDR_WIDTH(COL_RAM_ADDR_SPACE)
     ) sprite_col_ram (
         .clk  (clk),
-        .we   (1'b0),
-        .addr (sprite_idx),
-        .din  (0),
+        .we   (sprite_we),
+        .addr_w (vram_addr[7:0]),
+        .addr_r (sprite_idx),
+        .din  (vram_din),
         .dout (sprite_rgb332)
     );
 

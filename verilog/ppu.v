@@ -23,7 +23,15 @@ module ppu (
     input wire [31:0]  m00_bg,
     input wire [31:0]  m01_bg,
     input wire [31:0]  m10_bg,
-    input wire [31:0]  m11_bg
+    input wire [31:0]  m11_bg,
+
+    input wire we_vram,
+    input wire [15:0] vram_addr_in,
+    input wire [7:0] vram_din,
+
+    input wire we_oam,
+    input wire [4:0] oam_addr_in,
+    input wire [31:0] oam_din
 );
     localparam PPU_WIDTH = 256;
     localparam PPU_HEIGHT = 256;
@@ -48,6 +56,14 @@ module ppu (
     wire [7:0] bg_idx;
     wire [7:0] sprite_idx;
     wire sprite_lo_prio;
+
+    // chip select
+    wire [1:0] vram_chip_sel = vram_addr_in[15:14];
+    wire [13:0] vram_addr = vram_addr_in[13:0];
+    wire bg_we = we_vram && (vram_chip_sel == 2'b00);
+    wire fg_we = we_vram && (vram_chip_sel == 2'b01);
+    wire col_we = we_vram && (vram_chip_sel == 2'b10);
+    wire tile_sprite_we = we_vram && (vram_chip_sel == 2'b11);
 
     vga u_vga (
         .clk_25mhz   (clk),
@@ -101,7 +117,11 @@ module ppu (
         .m01 (m01_fg),
         .m10 (m10_fg),
         .m11 (m11_fg),
-        .we_scroll (we_scroll_fg)
+        .we_scroll (we_scroll_fg),
+
+        .vram_we (fg_we),
+        .vram_addr (vram_addr),
+        .vram_din (vram_din)
     );
 
     bg_layer_top #() bg (
@@ -117,7 +137,11 @@ module ppu (
         .m01 (m01_bg),
         .m10 (m10_bg),
         .m11 (m11_bg),
-        .we_scroll (we_scroll_bg)
+        .we_scroll (we_scroll_bg),
+
+        .vram_we (bg_we),
+        .vram_addr (vram_addr),
+        .vram_din (vram_din)
     );
 
     sprite_layer_top #() u_sprite_layer (
@@ -127,7 +151,15 @@ module ppu (
         .v_cnt (vga_v_cnt),
 
         .col_out (sprite_idx),
-        .lo_prio_out (sprite_lo_prio)
+        .lo_prio_out (sprite_lo_prio),
+
+        .oam_we (we_oam),
+        .oam_addr_in (oam_addr_in),
+        .oam_din (oam_din),
+
+        .tile_we (tile_sprite_we),
+        .tile_addr_in (vram_addr[12:0]),
+        .tile_din (vram_din)
     );
 
     color_mixer #() mixer (
@@ -141,7 +173,11 @@ module ppu (
 
         .r (r),
         .g (g),
-        .b (b)
+        .b (b),
+
+        .we (col_we),
+        .vram_addr (vram_addr),
+        .vram_din (vram_din)
     );
 
     

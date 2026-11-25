@@ -4,7 +4,8 @@ module ram #(
 ) (
     input  wire                  clk,
     input  wire                  we,
-    input  wire [ADDR_WIDTH-1:0] addr,
+    input  wire [ADDR_WIDTH-1:0] addr_r,
+    input  wire [ADDR_WIDTH-1:0] addr_w,
     input  wire [DATA_WIDTH-1:0] din,
     output reg  [DATA_WIDTH-1:0] dout
 );
@@ -14,8 +15,8 @@ module ram #(
 
     always @(posedge clk) begin
         if (we)
-            memory[addr] <= din;
-        dout <= memory[addr];
+            memory[addr_w] <= din;
+        dout <= memory[addr_r];
     end
 
 endmodule

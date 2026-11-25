@@ -22,7 +22,11 @@ module bg_layer_top #(
     input wire [31:0] m01,
     input wire [31:0] m10,
     input wire [31:0] m11,
-    input wire we_scroll
+    input wire we_scroll,
+
+    input wire vram_we,
+    input wire [13:0] vram_addr,
+    input wire [7:0] vram_din
 );
     wire [MAP_ADDR_WIDTH-1:0]  map_addr;
     wire [TILE_IDX_WIDTH-1:0]  map_dout;
@@ -30,6 +34,10 @@ module bg_layer_top #(
     wire [DATA_WIDTH-1:0]      tile_dout;
     wire [MAP_ADDR_WIDTH-1:0]  attr_addr;
     wire [TILE_IDX_WIDTH-1:0]  attr_dout;
+
+    wire tile_ram_we = vram_we && !vram_addr[13];
+    wire map_ram_we = vram_we && (vram_addr[13:12] == 2'b10);
+    wire attr_ram_we = vram_we && (vram_addr[13:12] == 2'b11);
 
     bg_layer #(
         .TILE_SIZE       (TILE_SIZE),
@@ -64,9 +72,10 @@ module bg_layer_top #(
         .ADDR_WIDTH(TILE_ADDR_WIDTH)
     ) tile_ram (
         .clk  (clk),
-        .we   (1'b0),
-        .addr (tile_addr),
-        .din  ({DATA_WIDTH{1'b0}}),
+        .we   (tile_ram_we),
+        .addr_w (vram_addr[12:0]),
+        .addr_r (tile_addr),
+        .din  (vram_din),
         .dout (tile_dout)
     );
 
@@ -76,9 +85,10 @@ module bg_layer_top #(
         .ADDR_WIDTH(MAP_ADDR_WIDTH)
     ) map_ram (
         .clk  (clk),
-        .we   (1'b0),
-        .addr (map_addr),
-        .din  ({TILE_IDX_WIDTH{1'b0}}),
+        .we   (map_ram_we),
+        .addr_w (vram_addr[11:0]),
+        .addr_r (map_addr),
+        .din  (vram_din),
         .dout (map_dout)
     );
 
@@ -87,9 +97,10 @@ module bg_layer_top #(
         .ADDR_WIDTH(MAP_ADDR_WIDTH)
     ) attr_ram (
         .clk  (clk),
-        .we   (1'b0),
-        .addr (attr_addr),
-        .din  ({DATA_WIDTH{1'b0}}),
+        .we   (attr_ram_we),
+        .addr_w (vram_addr[11:0]),
+        .addr_r (attr_addr),
+        .din  (vram_din),
         .dout (attr_dout)
     );
 endmodule

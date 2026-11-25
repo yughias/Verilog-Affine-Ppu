@@ -12,7 +12,15 @@ module sprite_layer_top #(
     input wire [9:0] v_cnt,
 
     output wire [7:0] col_out,
-    output wire lo_prio_out
+    output wire lo_prio_out,
+
+    input wire oam_we,
+    input wire [4:0] oam_addr_in,
+    input wire [31:0] oam_din,
+
+    input wire tile_we,
+    input wire [12:0] tile_addr_in,
+    input wire [7:0] tile_din
 );
 
     wire [4:0] oam_addr;
@@ -45,9 +53,10 @@ module sprite_layer_top #(
         .ADDR_WIDTH(5)
     ) oam_ram (
         .clk (clk),
-        .we (1'b0),
-        .addr (oam_addr),
-        .din (0),
+        .we (oam_we),
+        .addr_w (oam_addr_in),
+        .din (oam_din),
+        .addr_r (oam_addr),
         .dout (oam_dout)
     );
 
@@ -56,9 +65,10 @@ module sprite_layer_top #(
         .ADDR_WIDTH(11)
     ) tile_ram (
         .clk (clk),
-        .we (1'b0),
-        .addr (tile_addr),
-        .din (0),
+        .we (tile_we),
+        .addr_w (tile_addr_in[10:0]),
+        .din (tile_din),
+        .addr_r (tile_addr),
         .dout (tile_dout)
     );
 

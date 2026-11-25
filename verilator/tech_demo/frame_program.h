@@ -42,13 +42,14 @@ struct LineRegs { uint32_t x0[2], y0[2], m[2][4]; uint8_t we_bg, we_fg, oam; };
 static LineRegs line_regs[PPU_H];
 static uint32_t scanned_oam[PPU_H][32];                          // OAM as seen by the scan of each row
 
+// Debug probes: layer registers and position, read for the inspector
 #define BG_REG(n) ppu_root->ppu__DOT__bg__DOT__u_bg_layer__DOT__##n
 #define FG_REG(n) ppu_root->ppu__DOT__fg__DOT__u_bg_layer__DOT__##n
 
 // For the inspector: map position of every pixel, registers of every line, OAM scanned for every row
 static void capture_layer_state(int h, int v) {
     const bool scan_start = h == PPU_W && (v < PPU_H - 1 || v == V_TOTAL - 1);   // of the next row
-    if (scan_start) memcpy(scanned_oam[v == V_TOTAL - 1 ? 0 : v + 1], vram.oam, sizeof scanned_oam[0]);
+    if (scan_start) memcpy(scanned_oam[v == V_TOTAL - 1 ? 0 : v + 1], ppu_oam, sizeof scanned_oam[0]);
     if (v >= PPU_H || h >= PPU_W) return;
 
     const int i = v * PPU_W + h;
@@ -91,6 +92,7 @@ static void step() {
     if (h == 0 && band_at_line[v] >= 0) {
         const OamBand& b = program.bands[band_at_line[v]];
         std::copy(b.e, b.e + 32, vram.oam);
+        sync_oam();                              // 32 clocks at most, long before the scan at h = 256
         if (capture_registers && b.row < PPU_H) line_regs[b.row].oam = 1;
     }
 
@@ -102,6 +104,7 @@ static void step() {
 
 // One frame = [v=256,h=0 .. v=255,h=799]: vblank first (line 0 setup), then the visible lines
 static void run_program() {
+    sync_vram();                                 // only the first frame has VRAM to send
     rebuild_band_index();
     if (capture_registers) memset(line_regs, 0, sizeof line_regs);
     for (int i = 0; i < FRAME_CLOCKS; ++i) step();

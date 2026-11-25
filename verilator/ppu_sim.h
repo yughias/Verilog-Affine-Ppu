@@ -1,6 +1,9 @@
-// ppu_sim.h - what every simulation program shares: the Verilator model and its memories,
-// register / OAM encoding, the frame loop with a simulated VGA monitor, and the SDL window.
-// Each program is a single .cpp file, so everything here is static.
+// ppu_sim.h - what every simulation program shares: the Verilator model, a copy of the VRAM
+// sent to the PPU through its bus, register / OAM encoding, the frame loop with a simulated
+// VGA monitor, and the SDL window. Each program is a single .cpp file, so everything is static.
+//
+// The programs drive only the ports of ppu.v: the VRAM and OAM buses, the layer registers and
+// the clock. Internal signals are only read, by the debug probes below.
 #pragma once
 
 #include <algorithm>
@@ -34,28 +37,27 @@ constexpr int LAYER_TILES = 256, SPR_TILES = 64, NUM_OAM = 32;
 
 enum { L_BG = 0, L_FG = 1, L_SPR = 2 };
 
-// ---- Model and memories -----------------------------------------------------------
-struct Layer { CData *map, *attr, *tile, *col; };
-struct Vram {
-    Layer bg, fg;
-    CData *spr_tile, *spr_col;
-    IData *oam;
-};
+// ---- Model ------------------------------------------------------------------------
 static VerilatedContext* sim_context;
 static Vppu* ppu;
-static Vppu___024root* ppu_root;
-static Vram vram;
+static Vppu___024root* ppu_root;   // internal signals: read only, by the debug probes
 
-#define PPU_MEM(path) (&ppu_root->ppu__DOT__##path##__DOT__memory[0])
-static inline void bind_vram() {
-    vram.bg = Layer{PPU_MEM(bg__DOT__map_ram), PPU_MEM(bg__DOT__attr_ram), PPU_MEM(bg__DOT__tile_ram),
-                  PPU_MEM(mixer__DOT__bg_col_ram)};
-    vram.fg = Layer{PPU_MEM(fg__DOT__map_ram), PPU_MEM(fg__DOT__attr_ram), PPU_MEM(fg__DOT__tile_ram),
-                  PPU_MEM(mixer__DOT__fg_col_ram)};
-    vram.spr_tile = PPU_MEM(u_sprite_layer__DOT__tile_ram);
-    vram.spr_col = PPU_MEM(mixer__DOT__sprite_col_ram);
-    vram.oam = PPU_MEM(u_sprite_layer__DOT__oam_ram);
-}
+// ---- VRAM as the program wants it ---------------------------------------------------
+// The programs never touch the PPU memories: they edit this copy, and sync_vram() sends
+// the bytes that changed through the PPU bus (see "Bus" below and "Writing to the PPU" in the README).
+struct Layer {
+    uint8_t tile[LAYER_TILES * TILE_BYTES];  // 8x8, 4bpp, low nibble = left pixel
+    uint8_t map[MAP_CELLS];                  // tile of every cell
+    uint8_t attr[MAP_CELLS];                 // bank << 4 | flip_y << 1 | flip_x
+    uint8_t col[256];                        // col_ram of the layer, RGB332
+};
+struct Vram {
+    Layer bg, fg;
+    uint8_t spr_tile[SPR_TILES * TILE_BYTES];
+    uint8_t spr_col[256];
+    uint32_t oam[NUM_OAM];
+};
+static Vram vram;
 
 // Map cell (x, y), wrapping like the hardware. attr = bank << 4 | flip_y << 1 | flip_x
 static inline int cell_index(int x, int y) { return ((y & (MAP_H - 1)) << MAP_W_BITS) | (x & (MAP_W - 1)); }
@@ -64,6 +66,88 @@ static inline void set_cell(Layer& L, int x, int y, int tile, int bank, int flip
     int i = cell_index(x, y);
     L.map[i] = (uint8_t)tile;
     L.attr[i] = make_attr(bank, flip);
+}
+
+// ---- Bus ------------------------------------------------------------------------------
+// VRAM bus: 16-bit address, 8-bit data, one write per clock (README, "Writing to the PPU")
+//   15:14 = 00 BG layer, 01 FG layer, 10 col_rams, 11 sprite tiles
+//   layer:   13 = 0 tiles (13 bits), 13:12 = 10 map, 11 attributes (12 bits)
+//   col_ram: 13:12 = 00 BG, 01 FG, 10 sprites (8 bits)
+// OAM bus: 5-bit entry, 32-bit data, one write per clock
+constexpr uint16_t BUS_BG = 0x0000, BUS_FG = 0x4000, BUS_COL = 0x8000, BUS_SPR_TILE = 0xC000;
+constexpr uint16_t BUS_LAYER_TILE = 0x0000, BUS_LAYER_MAP = 0x2000, BUS_LAYER_ATTR = 0x3000;
+constexpr uint16_t BUS_COL_BG = 0x0000, BUS_COL_FG = 0x1000, BUS_COL_SPR = 0x2000;
+
+struct VramWrite { uint16_t addr; uint8_t data; };
+struct OamWrite { uint8_t entry; uint32_t data; };
+static std::vector<VramWrite> vram_queue;   // waiting for the bus, oldest first
+static std::vector<OamWrite> oam_queue;
+static size_t vram_next = 0, oam_next = 0;  // first write not sent yet
+static uint32_t ppu_oam[NUM_OAM];           // what the OAM of the PPU contains (sent writes)
+
+static inline void write_vram(uint16_t addr, uint8_t data) { vram_queue.push_back(VramWrite{addr, data}); }
+static inline void write_oam(int entry, uint32_t data) { oam_queue.push_back(OamWrite{(uint8_t)entry, data}); }
+
+// Every area of the VRAM copy with its bus address, and a record of what was last queued for it
+struct VramArea { const uint8_t* bytes; int size; uint16_t bus; std::vector<int> queued; };
+static std::vector<VramArea>& vram_areas() {
+    static std::vector<VramArea> areas;
+    if (!areas.empty()) return areas;
+    auto add = [&](const uint8_t* bytes, int size, int bus) {
+        areas.push_back(VramArea{bytes, size, (uint16_t)bus, std::vector<int>(size, -1)});   // -1: unknown
+    };
+    const Layer* layers[2] = {&vram.bg, &vram.fg};
+    for (int k = 0; k < 2; ++k) {
+        const uint16_t base = k ? BUS_FG : BUS_BG;
+        add(layers[k]->tile, sizeof layers[k]->tile, base + BUS_LAYER_TILE);
+        add(layers[k]->map, MAP_CELLS, base + BUS_LAYER_MAP);
+        add(layers[k]->attr, MAP_CELLS, base + BUS_LAYER_ATTR);
+    }
+    add(vram.bg.col, 256, BUS_COL + BUS_COL_BG);
+    add(vram.fg.col, 256, BUS_COL + BUS_COL_FG);
+    add(vram.spr_col, 256, BUS_COL + BUS_COL_SPR);
+    add(vram.spr_tile, sizeof vram.spr_tile, BUS_SPR_TILE);
+    return areas;
+}
+// Queue the VRAM bytes that changed since the last call (the first call sends everything)
+static inline void sync_vram() {
+    for (VramArea& area : vram_areas())
+        for (int i = 0; i < area.size; ++i) {
+            if (area.queued[i] == area.bytes[i]) continue;
+            area.queued[i] = area.bytes[i];
+            write_vram((uint16_t)(area.bus + i), area.bytes[i]);
+        }
+}
+// Queue the OAM entries that changed since the last call
+static inline void sync_oam() {
+    static uint32_t queued[NUM_OAM];
+    static bool first = true;
+    for (int i = 0; i < NUM_OAM; ++i) {
+        if (!first && queued[i] == vram.oam[i]) continue;
+        queued[i] = vram.oam[i];
+        write_oam(i, vram.oam[i]);
+    }
+    first = false;
+}
+// Put the next queued writes on the bus pins, for the coming clock
+static inline void drive_bus() {
+    ppu->we_vram = 0;
+    ppu->we_oam = 0;
+    if (vram_next < vram_queue.size()) {
+        const VramWrite& w = vram_queue[vram_next++];
+        ppu->we_vram = 1;
+        ppu->vram_addr_in = w.addr;
+        ppu->vram_din = w.data;
+    }
+    if (oam_next < oam_queue.size()) {
+        const OamWrite& w = oam_queue[oam_next++];
+        ppu->we_oam = 1;
+        ppu->oam_addr_in = w.entry;
+        ppu->oam_din = w.data;
+        ppu_oam[w.entry] = w.data;
+    }
+    if (vram_next == vram_queue.size()) { vram_queue.clear(); vram_next = 0; }
+    if (oam_next == oam_queue.size()) { oam_queue.clear(); oam_next = 0; }
 }
 
 // ---- Layer registers --------------------------------------------------------------
@@ -112,31 +196,14 @@ static inline uint32_t oam_entry(int sx, int sy, int tile, int pal, bool fx = fa
     return oam_word(X, sy, tile, pal, fx, fy, lo);
 }
 
-// ---- Clock, monitor and capture ------------------------------------------------------
-static std::vector<uint32_t> vga_image(VGA_W * VGA_H, 0xFF000000u);    // what the monitor shows (ARGB)
+// ---- Debug probes: internal signals, read only ------------------------------------------
+// Used by the views that show the layers one by one (inspector, editor); the image itself
+// always comes from the VGA pins.
 struct Captured {                                                // color_mixer.v inputs, per pixel
     uint8_t bg[PPU_W * PPU_H], fg[PPU_W * PPU_H];                // bank << 4 | color
     uint8_t sprite[PPU_W * PPU_H], low_prio[PPU_W * PPU_H];
 };
 static Captured captured;
-
-static inline int h_cnt() { return ppu_root->ppu__DOT__vga_h_cnt; }
-static inline int v_cnt() { return ppu_root->ppu__DOT__vga_v_cnt; }
-
-// One clock. The monitor locks to the HSYNC / VSYNC pins and samples the RGB pins.
-static inline void clock_ppu() {
-    static int x = 0, y = 0;
-    static bool prev_h = true, prev_v = true;
-    ppu->clk = 0; ppu->eval(); sim_context->timeInc(20);   // 25 MHz = 40 ns
-    ppu->clk = 1; ppu->eval(); sim_context->timeInc(20);
-    if (prev_h && !ppu->hsync) { x = -H_SYNC_BACK; ++y; }
-    if (prev_v && !ppu->vsync) y = -V_SYNC_BACK;
-    if (x >= 0 && x < VGA_W && y >= 0 && y < VGA_H)
-        vga_image[y * VGA_W + x] = 0xFF000000u | ((uint32_t)ppu->vga_r << 16) | ((uint32_t)ppu->vga_g << 8) | ppu->vga_b;
-    ++x;
-    prev_h = ppu->hsync;
-    prev_v = ppu->vsync;
-}
 
 // Call before the clock: the indices of pixel p are at the mixer inputs at h = p + 2
 static inline void capture_indices(int h, int v) {
@@ -153,8 +220,38 @@ static inline int mixer_winner(uint8_t fg, uint8_t spr, bool lo) {
     return s && !(lo && f) ? L_SPR : f ? L_FG : L_BG;
 }
 
-// One frame, from the start of the vblank (v = 256, h = 0), with fixed layer registers
+// ---- Clock and monitor ------------------------------------------------------------------
+static std::vector<uint32_t> vga_image(VGA_W * VGA_H, 0xFF000000u);    // what the monitor shows (ARGB)
+
+// Position of the VGA counters, known by counting the clocks since the reset: the counters
+// of vga.v start at 0 with the reset and advance by one pixel per clock
+static uint64_t clocks_since_reset = 0;
+static inline int h_cnt() { return (int)(clocks_since_reset % H_TOTAL); }
+static inline int v_cnt() { return (int)(clocks_since_reset / H_TOTAL % V_TOTAL); }
+
+// One clock: queued bus writes, then the edge. The monitor locks to the HSYNC / VSYNC pins
+// and samples the RGB pins.
+static inline void clock_ppu() {
+    static int x = 0, y = 0;
+    static bool prev_h = true, prev_v = true;
+    drive_bus();
+    ppu->clk = 0; ppu->eval(); sim_context->timeInc(20);   // 25 MHz = 40 ns
+    ppu->clk = 1; ppu->eval(); sim_context->timeInc(20);
+    clocks_since_reset = ppu->rst ? 0 : clocks_since_reset + 1;
+    if (prev_h && !ppu->hsync) { x = -H_SYNC_BACK; ++y; }
+    if (prev_v && !ppu->vsync) y = -V_SYNC_BACK;
+    if (x >= 0 && x < VGA_W && y >= 0 && y < VGA_H)
+        vga_image[y * VGA_W + x] = 0xFF000000u | ((uint32_t)ppu->vga_r << 16) | ((uint32_t)ppu->vga_g << 8) | ppu->vga_b;
+    ++x;
+    prev_h = ppu->hsync;
+    prev_v = ppu->vsync;
+}
+
+// One frame, from the start of the vblank (v = 256, h = 0), with fixed layer registers.
+// The VRAM and OAM changes go out first, during the vblank.
 static inline void run_frame(const Regs& bg, const Regs& fg) {
+    sync_vram();
+    sync_oam();
     for (int i = 0; i < FRAME_CLOCKS; ++i) {
         const int h = h_cnt(), v = v_cnt();
         ppu->we_scroll_bg = ppu->we_scroll_fg = 0;
@@ -164,21 +261,13 @@ static inline void run_frame(const Regs& bg, const Regs& fg) {
     }
 }
 
-// Create and reset the model, clear the memories, stop at the start of the first vblank
+// Create and reset the model, then stop at the start of the first vblank.
+// Nothing is written yet: the first sync sends the whole VRAM (all zero until the program loads it).
 static inline void sim_init(int argc, char** argv) {
     sim_context = new VerilatedContext;
     sim_context->commandArgs(argc, argv);
     ppu = new Vppu(sim_context);
     ppu_root = ppu->rootp;
-    bind_vram();
-    for (Layer* L : {&vram.bg, &vram.fg}) {
-        memset(L->map, 0, MAP_CELLS);
-        memset(L->attr, 0, MAP_CELLS);
-        memset(L->tile, 0, LAYER_TILES * TILE_BYTES);
-        memset(L->col, 0, 256);
-    }
-    memset(vram.spr_tile, 0, SPR_TILES * TILE_BYTES);
-    memset(vram.spr_col, 0, 256);
     std::fill(vram.oam, vram.oam + NUM_OAM, OAM_HIDDEN);
 
     ppu->rst = 1;

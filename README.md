@@ -28,7 +28,58 @@ If you are here to look at something, look at the Verilog.
 - 32 sprites, 8x8, with flip and a low priority bit to go behind the foreground
 - up to 8 sprites per line
 
-The memories have no write port connected yet: the simulation writes tiles, maps and palettes straight into them. There are also two unused bits in the tile attributes and a "big sprite" bit in the OAM that does nothing for now.
+There are also two unused bits in the tile attributes and a "big sprite" bit in the OAM that does nothing for now.
+
+## Writing to the PPU
+
+Everything goes through the ports of `ppu.v`, one write per clock. The memories have a separate read port, so they can be written at any time, even while the picture is drawn. The simulation uses only these: it keeps a copy of the VRAM and sends what changed.
+
+### VRAM bus
+
+`we_vram`, `vram_addr_in` (16 bits), `vram_din` (8 bits). The top two bits pick the area:
+
+| Address | Bits | What |
+|---|---|---|
+| `0000`-`1FFF` | `00 0` + 13 | BG tiles: 256 tiles x 32 bytes |
+| `2000`-`2FFF` | `00 10` + 12 | BG map: 64x64 cells, one tile number each |
+| `3000`-`3FFF` | `00 11` + 12 | BG attributes: one byte per cell |
+| `4000`-`7FFF` | `01` ... | FG, same layout as the BG |
+| `8000`-`80FF` | `10 00` + 12 | BG palettes: 16 banks x 16 colors, RGB332 |
+| `9000`-`90FF` | `10 01` + 12 | FG palettes |
+| `A000`-`A0FF` | `10 10` + 12 | sprite palettes |
+| `C000`-`C7FF` | `11` + 14 | sprite tiles: 64 tiles x 32 bytes |
+
+The palette and sprite tile memories are smaller than their area, so they mirror inside it (`8100` writes the same byte as `8000`). `B000`-`BFFF` is free.
+
+- **Tiles:** 8x8 pixels at 4 bits, 4 bytes per row, the low nibble is the left pixel. Color 0 is transparent on the FG and on the sprites.
+- **Attributes:** bit 0 flips X, bit 1 flips Y, bits 3:2 are free, bits 7:4 pick the palette bank.
+
+### OAM bus
+
+`we_oam`, `oam_addr_in` (5 bits, the sprite), `oam_din` (32 bits, a whole sprite in one write):
+
+| Bits | What |
+|---|---|
+| 8:0 | X, screen x + 8 (0..7 clips the sprite on the left) |
+| 17:9 | Y, screen y |
+| 23:18 | tile |
+| 27:24 | palette bank |
+| 28, 29 | flip X, flip Y |
+| 30 | low priority: behind the FG |
+| 31 | big sprite, not used yet |
+
+Sprite 0 is drawn on top. The OAM can be rewritten during the frame: the sprites of a line are read at the end of the line before.
+
+### Layer registers
+
+Each layer has its own ports, all 16.16 fixed point: `scroll_x`, `scroll_y` and the matrix `m00`, `m01`, `m10`, `m11`. A pulse on `we_scroll` loads all six at once. Pixel (x, y) of the screen reads the map at
+
+```
+map_x = scroll_x + m00 * x + m10 * y
+map_y = scroll_y + m01 * x + m11 * y
+```
+
+Writing them during the hblank changes the next line: that is how the Mode 7 floor and the split screen work.
 
 ## The code
 

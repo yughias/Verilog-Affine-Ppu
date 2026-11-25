@@ -4,10 +4,11 @@
 // (tech_demo/inspector.h) that shows what every layer is doing.
 //
 // THE RULE: the VRAM (BG/FG tile, map and attribute RAMs, the three col_rams and the
-// sprite tile RAM) is written ONCE, in load_vram(), right after reset. Between frames
+// sprite tile RAM) is written ONCE: load_vram() fills it right after reset, and the first
+// frame sends it through the VRAM bus during the vblank. Between frames
 // (and inside a frame) the program only touches:
 //   - the scroll/matrix registers of the two layers (ports *_bg / *_fg + we_scroll_*)
-//   - the OAM (32 x 32-bit)
+//   - the OAM (32 x 32-bit), through the OAM bus
 // Everything that moves, changes text or switches scene is done through those two.
 //
 // Features shown
